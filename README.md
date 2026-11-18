@@ -22,6 +22,18 @@ Text from the Screensaver:
 - 正常 (Normal)
 - レース (Racing)
 
+## Motion
+
+This fork follows the laptop's orientation from [wabe](https://github.com/shepardxia/wabe). The
+panel holds the orientation it had in the room when the screensaver started. Turning the laptop or
+moving the lid turns it the other way, from the style's own starting angle, along the iOS
+rubber-band curve. It never turns more than 25°, so the clock stays readable even facing away.
+Without a running wabe daemon the clock stays still.
+
+```
+make install    # build, install into ~/Library/Screen Savers
+```
+
 ## Installation
 
 1. Download the [latest version](https://github.com/Wandmalfarbe/evangelion-clock-screensaver/releases/latest) of the screensaver from the releases page.

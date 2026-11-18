@@ -1,12 +1,35 @@
 #import "EvangelionClock.h"
 #import <WebKit/WebKit.h>
-
-@implementation EvangelionClock
+#import <errno.h>
+#import <fcntl.h>
+#import <netinet/in.h>
+#import <sys/socket.h>
 
 static NSString * const evangelionClockModule = @"de.pascal-wagler.evangelion-clock";
 
+// The wabe daemon's loopback port, WABE_TCP_PORT in wabe.h. The screensaver host's sandbox refuses
+// the daemon's unix socket but allows loopback TCP.
+static const uint16_t wabePort = 7465;
+
+@implementation EvangelionClock {
+    WebView *_page;
+    dispatch_source_t _wabe;  // the daemon connection; nil between attempts
+    NSMutableData *_unread;
+}
+
 - (id)initWithFrame:(NSRect)frame isPreview:(BOOL)isPreview {
     if (!(self = [super initWithFrame:frame isPreview:isPreview])) return nil;
+
+    // legacyScreenSaver keeps a dismissed saver alive and animating, still reading the daemon, so
+    // the host has to go when the screensaver stops.
+    if (!isPreview) {
+        [NSDistributedNotificationCenter.defaultCenter addObserverForName:@"com.apple.screensaver.willstop"
+                                                                   object:nil
+                                                                    queue:NSOperationQueue.mainQueue
+                                                               usingBlock:^(NSNotification *note) {
+            exit(0);
+        }];
+    }
 
     // Preference Defaults
     ScreenSaverDefaults *defaults;
@@ -54,26 +77,99 @@ static NSString * const evangelionClockModule = @"de.pascal-wagler.evangelion-cl
         // The screen the menubar is shown on under 'arrangement'
         case 0:
             if ((primaryScreen.frame.origin.x == frame.origin.x) || isPreview) {
-                [self addSubview:webView];
+                [self show:webView];
             }
             break;
         // Last Focussed Screen
         // This _sometimes_ results in nothing being shown when previewing in system prefs.
         case 1:
             if (([NSScreen mainScreen].frame.origin.x == frame.origin.x) || isPreview) {
-                [self addSubview:webView];
+                [self show:webView];
             }
             break;
         // All Screens
         case 2:
-            [self addSubview:webView];
+            [self show:webView];
             break;
         default:
-            [self addSubview:webView];
+            [self show:webView];
             break;
     }
 
     return self;
+}
+
+- (void)show:(WebView *)webView {
+    [self addSubview:webView];
+    _page = webView;
+    [self connectWabe];
+}
+
+- (void)dealloc {
+    if (_wabe) dispatch_source_cancel(_wabe);
+}
+
+#pragma mark - wabe
+
+// Hands the page the screen normal from the daemon's newest line, retrying each second while no
+// daemon answers.
+- (void)connectWabe {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = {
+        .sin_len = sizeof(addr),
+        .sin_family = AF_INET,
+        .sin_port = htons(wabePort),
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+    };
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        [self retryWabe];
+        return;
+    }
+    send(fd, "rate 60\n", 8, 0);
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+    _unread = [NSMutableData data];
+    _wabe = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, dispatch_get_main_queue());
+    __weak EvangelionClock *weakSelf = self;
+    dispatch_source_set_event_handler(_wabe, ^{ [weakSelf readWabe:fd]; });
+    dispatch_source_set_cancel_handler(_wabe, ^{ close(fd); });
+    dispatch_resume(_wabe);
+}
+
+- (void)retryWabe {
+    __weak EvangelionClock *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        [weakSelf connectWabe];
+    });
+}
+
+- (void)readWabe:(int)fd {
+    char chunk[4096];
+    ssize_t n = read(fd, chunk, sizeof(chunk));
+    if (n < 0 && errno == EAGAIN) return;
+    if (n <= 0) {
+        dispatch_source_cancel(_wabe);
+        _wabe = nil;
+        [_page.windowScriptObject callWebScriptMethod:@"wabePose" withArguments:@[]];
+        [self retryWabe];
+        return;
+    }
+    [_unread appendBytes:chunk length:(NSUInteger)n];
+
+    // Only the newest complete line matters; any before it in the same read are already stale.
+    NSData *newline = [NSData dataWithBytes:"\n" length:1];
+    NSRange end = [_unread rangeOfData:newline options:NSDataSearchBackwards range:NSMakeRange(0, _unread.length)];
+    if (end.location == NSNotFound) return;
+    NSRange before = [_unread rangeOfData:newline options:NSDataSearchBackwards range:NSMakeRange(0, end.location)];
+    NSUInteger start = before.location == NSNotFound ? 0 : NSMaxRange(before);
+    NSData *line = [_unread subdataWithRange:NSMakeRange(start, end.location - start)];
+    [_unread replaceBytesInRange:NSMakeRange(0, NSMaxRange(end)) withBytes:NULL length:0];
+
+    NSDictionary *pose = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
+    NSArray *normal = pose[@"n"];
+    // A machine without the hinge sensor publishes a zero normal: nothing to follow.
+    if (normal.count == 3 && ![normal isEqual:@[@0, @0, @0]])
+        [_page.windowScriptObject callWebScriptMethod:@"wabePose" withArguments:normal];
 }
 
 #pragma mark - ScreenSaverView
