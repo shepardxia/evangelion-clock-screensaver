@@ -223,19 +223,20 @@ module.exports = function(grunt) {
 		svgmin: {
 			static: {
 				options: {
-					plugins: [
-						{
-							removeViewBox: false
-						},
-						{
-							cleanupIDs: {
-								preservePrefixes: [
-									"clock-digit",
-									"clock-dots"
-								]
+					plugins: [{
+						name: "preset-default",
+						params: {
+							overrides: {
+								removeViewBox: false,
+								cleanupIds: {
+									preservePrefixes: [
+										"clock-digit",
+										"clock-dots"
+									]
+								}
 							}
 						}
-					]
+					}]
 				},
 				files: [{
 					expand: true,
